@@ -155,6 +155,8 @@ class InputPreprocessor:
             inputs["prompt"] = prompt_text
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
+        if prompt_cache_key := parsed_content.get("prompt_cache_key"):
+            inputs["prompt_cache_key"] = prompt_cache_key
 
         return inputs
 
@@ -184,6 +186,8 @@ class InputPreprocessor:
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
+        if prompt_cache_key := parsed_content.get("prompt_cache_key"):
+            inputs["prompt_cache_key"] = prompt_cache_key
 
         return inputs
 

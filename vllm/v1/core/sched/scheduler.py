@@ -614,7 +614,9 @@ class Scheduler(SchedulerInterface):
                     )
 
                     # Get externally-cached tokens if using a KVConnector.
-                    if self.connector is not None:
+                    if self.connector is not None and not (
+                        self._connector_offload_gated(request)
+                    ):
                         ext_tokens, load_kv_async = (
                             self.connector.get_num_new_matched_tokens(
                                 request, num_new_local_computed_tokens
@@ -2002,6 +2004,17 @@ class Scheduler(SchedulerInterface):
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
 
+    def _connector_offload_gated(self, request: Request) -> bool:
+        """Return True when the connector should not see this request because
+        KVTransferConfig.require_cache_key_for_offload is set but the request
+        has no prompt_cache_key. Used to realize the 'VRAM APC for all, but
+        only tagged requests cross the KV connector boundary' deployment
+        model without touching each concrete connector implementation."""
+        kv_cfg = self.vllm_config.kv_transfer_config
+        if kv_cfg is None or not kv_cfg.require_cache_key_for_offload:
+            return False
+        return not request.prompt_cache_key
+
     def _connector_finished(
         self, request: Request
     ) -> tuple[bool, dict[str, Any] | None]:
@@ -2012,6 +2025,9 @@ class Scheduler(SchedulerInterface):
         request outputs.
         """
         if self.connector is None:
+            return False, None
+
+        if self._connector_offload_gated(request):
             return False, None
 
         # Free any out-of-window prefix blocks before we hand the block table to

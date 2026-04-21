@@ -138,6 +138,7 @@ class ServingTokens(OpenAIServing):
                 mm_hashes=features.mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
+                prompt_cache_key=request.prompt_cache_key,
             )
         else:
             (engine_input,) = await self.openai_serving_render.preprocess_completion(

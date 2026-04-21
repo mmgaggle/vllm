@@ -25,6 +25,9 @@ class _InputOptions(TypedDict):
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
+    prompt_cache_key: NotRequired[str]
+    """Optional OpenAI-compatible deterministic prompt cache partition key."""
+
 
 class TokensInput(_InputOptions):
     """Represents token-based input to the engine."""
@@ -44,6 +47,7 @@ def tokens_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> TokensInput:
     """
     Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
@@ -55,6 +59,8 @@ def tokens_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if prompt_cache_key is not None:
+        inputs["prompt_cache_key"] = prompt_cache_key
 
     return inputs
 
@@ -77,6 +83,7 @@ def embeds_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> EmbedsInput:
     """
     Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
@@ -88,6 +95,8 @@ def embeds_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if prompt_cache_key is not None:
+        inputs["prompt_cache_key"] = prompt_cache_key
 
     return inputs
 
@@ -137,6 +146,7 @@ def mm_input(
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    prompt_cache_key: str | None = None,
 ) -> MultiModalInput:
     inputs = MultiModalInput(
         type="multimodal",
@@ -150,6 +160,8 @@ def mm_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if prompt_cache_key is not None:
+        inputs["prompt_cache_key"] = prompt_cache_key
 
     return inputs
 
@@ -335,6 +347,8 @@ def build_enc_dec_input(
 
     if cache_salt := enc_input.get("cache_salt"):
         dec_input_new["cache_salt"] = cache_salt
+    if prompt_cache_key := enc_input.get("prompt_cache_key"):
+        dec_input_new["prompt_cache_key"] = prompt_cache_key
 
     return EncoderDecoderInput(
         type="enc_dec",

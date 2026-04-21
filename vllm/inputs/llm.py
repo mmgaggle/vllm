@@ -95,6 +95,11 @@ class _PromptOptions(TypedDict):
     Optional cache salt to be used for prefix caching.
     """
 
+    prompt_cache_key: NotRequired[str]
+    """
+    Optional OpenAI-compatible deterministic prompt cache partition key.
+    """
+
 
 class TextPrompt(_PromptOptions):
     """Schema for a text prompt."""

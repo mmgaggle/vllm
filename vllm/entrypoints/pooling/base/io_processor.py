@@ -148,7 +148,7 @@ class PoolingIOProcessor:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "prompt_cache_key")
                 if (v := getattr(request, k, None)) is not None
             },
         )
@@ -189,7 +189,7 @@ class PoolingIOProcessor:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "prompt_cache_key")
                 if (v := getattr(request, k, None)) is not None
             },
         )

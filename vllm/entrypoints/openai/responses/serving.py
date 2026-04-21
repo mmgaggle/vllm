@@ -715,7 +715,11 @@ class OpenAIServingResponses(OpenAIServing):
         arrival_time = time.time()
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+        engine_input = tokens_input(
+            prompt_token_ids,
+            cache_salt=request.cache_salt,
+            prompt_cache_key=request.prompt_cache_key,
+        )
         engine_input["arrival_time"] = arrival_time
 
         return messages, [engine_input]

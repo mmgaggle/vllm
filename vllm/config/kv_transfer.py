@@ -72,6 +72,13 @@ class KVTransferConfig:
     'recompute': reschedule the request to recompute failed blocks
     'fail': immediately fail the request with an error finish reason (default)"""
 
+    require_cache_key_for_offload: bool = False
+    """If True, the scheduler will only query the KV connector and report
+    requests as finished when the request carries a non-empty
+    ``prompt_cache_key``. Requests without a key still benefit from in-VRAM
+    automatic prefix caching but their blocks never leave the engine. Opt-in
+    knob for the 'VRAM APC for all, tagged-only egress' deployment model."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,

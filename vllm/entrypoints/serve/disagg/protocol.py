@@ -93,6 +93,13 @@ class GenerateRequest(BaseModel):
             "to 256 bit)."
         ),
     )
+    prompt_cache_key: str | None = Field(
+        default=None,
+        max_length=256,
+        description=(
+            "OpenAI-compatible deterministic prompt cache partition key."
+        ),
+    )
     priority: int = Field(
         default=0,
         ge=-(2**63),

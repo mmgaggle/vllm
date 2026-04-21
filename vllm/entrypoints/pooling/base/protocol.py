@@ -10,6 +10,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.cache_params import parse_cache_retention
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.renderers import ChatParams, merge_kwargs
@@ -66,6 +67,47 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
             "to 256 bit)."
         ),
     )
+    prompt_cache_key: str | None = Field(
+        default=None,
+        max_length=256,
+        description=(
+            "OpenAI-compatible deterministic prompt cache partition key. "
+            "Requests sharing the same prompt_cache_key (and cache_salt) "
+            "coalesce into the same cached prefix. Unlike cache_salt — a "
+            "random per-tenant isolation salt — prompt_cache_key is meant "
+            "to be chosen and shared deliberately."
+        ),
+    )
+    prompt_cache_retention: str | None = Field(
+        default=None,
+        description=(
+            "OpenAI-compatible retention hint. Either 'default' or an integer "
+            "followed by one of 's', 'm', 'h', 'd' (e.g. '24h'). Validated "
+            "for syntax; not forwarded to KV connectors on pooling requests."
+        ),
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_prompt_cache_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        key = data.get("prompt_cache_key")
+        if key is not None and (not isinstance(key, str) or not key):
+            raise VLLMValidationError(
+                "Parameter 'prompt_cache_key' must be a non-empty string if "
+                "provided.",
+                parameter="prompt_cache_key",
+            )
+        retention = data.get("prompt_cache_retention")
+        if retention is not None:
+            try:
+                parse_cache_retention(retention)
+            except ValueError as e:
+                raise VLLMValidationError(
+                    str(e), parameter="prompt_cache_retention"
+                ) from e
+        return data
     # --8<-- [end:pooling-common-extra-params]
 
 

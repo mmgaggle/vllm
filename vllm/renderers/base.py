@@ -739,6 +739,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return embeds_input(
             prompt_embeds=prompt_embeds,
             cache_salt=prompt.get("cache_salt"),
+            prompt_cache_key=prompt.get("prompt_cache_key"),
         )
 
     async def _process_tokens_async(

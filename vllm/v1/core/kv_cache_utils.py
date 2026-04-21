@@ -379,10 +379,12 @@ def need_extra_keys(request: Request) -> bool:
     # Multimodal requests need to include the MM hash.
     # LoRA requests need to include the LoRA name.
     # Request with provided cache salt need to include the salt.
+    # Request with prompt_cache_key need to include that key.
     return (
         bool(request.mm_features)
         or (request.lora_request is not None)
         or (request.cache_salt is not None)
+        or (request.prompt_cache_key is not None)
     )
 
 
@@ -518,12 +520,26 @@ def generate_block_hash_extra_keys(
     cache_salt_keys: list[str] = (
         [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
     )
+    # prompt_cache_key partitions the chain the same way as cache_salt: it is
+    # folded into the first block only, and the Merkle chain in
+    # hash_block_tokens propagates the partition to every downstream block.
+    # It is stored under its own namespace tag so it can never collide with
+    # a cache_salt value containing the same string.
+    prompt_cache_key_entries: list[tuple[str, str]] = (
+        [("prompt_cache_key", request.prompt_cache_key)]
+        if (start_token_idx == 0 and request.prompt_cache_key)
+        else []
+    )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
         request, start_token_idx, end_token_idx
     )
 
     extra_keys: list[Any] = (
-        lora_extra_keys + mm_extra_keys + cache_salt_keys + prompt_embeds_keys
+        lora_extra_keys
+        + mm_extra_keys
+        + cache_salt_keys
+        + prompt_cache_key_entries
+        + prompt_embeds_keys
     )
 
     if not extra_keys:

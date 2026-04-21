@@ -61,6 +61,7 @@ def make_request(
     mm_hashes: list[str] | None = None,
     prompt_logprobs: int | None = None,
     cache_salt: str | None = None,
+    prompt_cache_key: str | None = None,
     lora_request: LoRARequest | None = None,
 ):
     mm_features = []
@@ -86,6 +87,7 @@ def make_request(
         pooling_params=None,
         lora_request=lora_request,
         cache_salt=cache_salt,
+        prompt_cache_key=prompt_cache_key,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
 
@@ -1710,6 +1712,108 @@ def test_cache_key_salting():
     assert block_hashes[2] == sha256(
         (block_hashes[1], tuple(token_ids[block_size * 2 : block_size * 3]), None)
     )
+
+
+def test_prompt_cache_key_partitions_apc():
+    """prompt_cache_key must partition APC just like cache_salt, and do so
+    independently (different prompt_cache_key on the same cache_salt must miss;
+    same prompt_cache_key under different cache_salts must also miss)."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    token_ids = common_token_ids + [3] * 11
+    req0 = make_request(
+        "0", token_ids, block_size, sha256, prompt_cache_key="tenant-A/thread-1"
+    )
+    computed, n = manager.get_computed_blocks(req0)
+    assert n == 0
+    manager.allocate_slots(req0, 59, len(computed.blocks[0]) * 16, computed)
+
+    # Same tokens + same prompt_cache_key -> cache hit on 3 complete blocks.
+    req1 = make_request(
+        "1", token_ids, block_size, sha256, prompt_cache_key="tenant-A/thread-1"
+    )
+    computed, n = manager.get_computed_blocks(req1)
+    assert len(computed.blocks[0]) == 3
+    assert n == 3 * block_size
+
+    # Same tokens + different prompt_cache_key -> cache miss.
+    req2 = make_request(
+        "2", token_ids, block_size, sha256, prompt_cache_key="tenant-A/thread-2"
+    )
+    computed, n = manager.get_computed_blocks(req2)
+    assert len(computed.blocks[0]) == 0
+    assert n == 0
+
+    # Same tokens + same cache_salt + different prompt_cache_key -> miss.
+    req3 = make_request(
+        "3",
+        token_ids,
+        block_size,
+        sha256,
+        cache_salt="salt1",
+        prompt_cache_key="key-X",
+    )
+    manager.allocate_slots(req3, 59, 0, manager.get_computed_blocks(req3)[0])
+    req4 = make_request(
+        "4",
+        token_ids,
+        block_size,
+        sha256,
+        cache_salt="salt1",
+        prompt_cache_key="key-Y",
+    )
+    computed, n = manager.get_computed_blocks(req4)
+    assert len(computed.blocks[0]) == 0
+    assert n == 0
+
+    # Same tokens + same prompt_cache_key + different cache_salt -> miss.
+    req5 = make_request(
+        "5",
+        token_ids,
+        block_size,
+        sha256,
+        cache_salt="salt2",
+        prompt_cache_key="key-X",
+    )
+    computed, n = manager.get_computed_blocks(req5)
+    assert len(computed.blocks[0]) == 0
+    assert n == 0
+
+
+def test_prompt_cache_key_collision_resistant_with_cache_salt():
+    """A prompt_cache_key value that happens to equal a cache_salt value must
+    not alias. They are stored under distinct namespaces."""
+    block_size = 16
+    manager = KVCacheManager(
+        make_kv_cache_config(block_size, 11),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    token_ids = common_token_ids + [3] * 11
+
+    req0 = make_request("0", token_ids, block_size, sha256, cache_salt="shared")
+    computed, _ = manager.get_computed_blocks(req0)
+    manager.allocate_slots(req0, 59, 0, computed)
+
+    # Setting prompt_cache_key="shared" without a cache_salt must NOT hit
+    # the req0 cache, because the two hash inputs sit in different
+    # namespaces.
+    req1 = make_request(
+        "1", token_ids, block_size, sha256, prompt_cache_key="shared"
+    )
+    computed, n = manager.get_computed_blocks(req1)
+    assert len(computed.blocks[0]) == 0
+    assert n == 0
 
 
 def test_prefill_not_enough_free_blocks_with_computed_blocks():

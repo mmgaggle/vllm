@@ -58,6 +58,10 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.openai.cache_params import (
+    merge_cache_retention as _with_cache_retention,
+)
+from vllm.entrypoints.openai.cache_params import parse_cache_retention
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -193,10 +197,22 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     prompt_cache_key: str | None = Field(
         default=None,
+        max_length=256,
         description=(
-            "A key that was used to read from or write to the prompt cache."
-            "Note: This field has not been implemented yet "
-            "and vLLM will ignore it."
+            "OpenAI-compatible deterministic prompt cache partition key. "
+            "Requests sharing the same prompt_cache_key (and cache_salt) "
+            "coalesce into the same cached prefix. Unlike cache_salt — "
+            "a random per-tenant isolation salt — prompt_cache_key is "
+            "meant to be chosen and shared deliberately."
+        ),
+    )
+    prompt_cache_retention: str | None = Field(
+        default=None,
+        description=(
+            "OpenAI-compatible retention hint. Either 'default' or an integer "
+            "followed by one of 's', 'm', 'h', 'd' (e.g. '24h'). Forwarded to "
+            "KV connectors that honor TTLs; does not affect in-VRAM APC "
+            "eviction."
         ),
     )
 
@@ -380,8 +396,11 @@ class ResponsesRequest(OpenAIBaseModel):
             stop = [stop]
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
-        if self.kv_transfer_params:
-            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        kv_transfer_params = _with_cache_retention(
+            self.kv_transfer_params, self.prompt_cache_retention
+        )
+        if kv_transfer_params:
+            extra_args["kv_transfer_params"] = kv_transfer_params
 
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -447,6 +466,28 @@ class ResponsesRequest(OpenAIBaseModel):
                 "Parameter 'cache_salt' must be a non-empty string if provided.",
                 parameter="cache_salt",
             )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_prompt_cache_fields(cls, data):
+        if not isinstance(data, dict):
+            return data
+        key = data.get("prompt_cache_key")
+        if key is not None and (not isinstance(key, str) or not key):
+            raise VLLMValidationError(
+                "Parameter 'prompt_cache_key' must be a non-empty string if "
+                "provided.",
+                parameter="prompt_cache_key",
+            )
+        retention = data.get("prompt_cache_retention")
+        if retention is not None:
+            try:
+                parse_cache_retention(retention)
+            except ValueError as e:
+                raise VLLMValidationError(
+                    str(e), parameter="prompt_cache_retention"
+                ) from e
         return data
 
     @model_validator(mode="before")

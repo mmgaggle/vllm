@@ -179,6 +179,7 @@ class OpenAIServingRender:
             stream=bool(request.stream),
             stream_options=(request.stream_options if request.stream else None),
             cache_salt=request.cache_salt,
+            prompt_cache_key=request.prompt_cache_key,
             priority=request.priority,
         )
 
@@ -314,6 +315,7 @@ class OpenAIServingRender:
                     stream=bool(request.stream),
                     stream_options=(request.stream_options if request.stream else None),
                     cache_salt=request.cache_salt,
+                    prompt_cache_key=request.prompt_cache_key,
                     priority=request.priority,
                 )
             )
@@ -429,7 +431,11 @@ class OpenAIServingRender:
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
+        engine_input = tokens_input(
+            prompt_token_ids,
+            cache_salt=request.cache_salt,
+            prompt_cache_key=request.prompt_cache_key,
+        )
 
         return messages, [engine_input]
 
@@ -511,7 +517,7 @@ class OpenAIServingRender:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "prompt_cache_key")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,
@@ -557,7 +563,7 @@ class OpenAIServingRender:
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "prompt_cache_key")
                 if (v := getattr(request, k, None)) is not None
             },
             skip_mm_cache=skip_mm_cache,
