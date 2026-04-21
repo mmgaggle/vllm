@@ -7,6 +7,12 @@ Automatic Prefix Caching (APC in short) caches the KV cache of existing queries,
 !!! note
     Technical details on how vLLM implements APC can be found [here](../design/prefix_caching.md).
 
+!!! tip
+    For per-request cache partitioning (`prompt_cache_key`), retention hints
+    (`prompt_cache_retention`), and the opt-in gate that restricts KV-connector
+    offload to tagged requests, see
+    [Prompt Cache Controls](prompt_cache_controls.md).
+
 ## Enabling APC in vLLM
 
 Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an example:
