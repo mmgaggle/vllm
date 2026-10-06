@@ -155,7 +155,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
-        agent_config = nixl_agent_config(backends=[])
+        # Telemetry gives each finished transfer its duration (see
+        # _poll_active_transfers); without it NIXL refuses the query.
+        agent_config = nixl_agent_config(backends=[], capture_telemetry=True)
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
@@ -334,8 +336,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
             transfer_time = None
             if success:
-                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
-                transfer_time = telemetry.xferDuration / 1e6
+                # The duration only feeds metrics, so a missing value (NIXL
+                # telemetry disabled, e.g. NIXL_TELEMETRY_ENABLE=n) must not
+                # fail the job or the engine.
+                try:
+                    telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                    transfer_time = telemetry.xferDuration / 1e6
+                except Exception as exc:
+                    logger.debug("no transfer telemetry for job %d: %s", job_id, exc)
 
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)

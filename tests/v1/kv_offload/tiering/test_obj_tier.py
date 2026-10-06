@@ -331,6 +331,19 @@ class TestMockObjTierBasic:
         assert len(results) == 2
         assert all(r.success for r in results)
 
+    def test_missing_telemetry_does_not_fail_the_job(self):
+        """NIXL refuses get_xfer_telemetry() when telemetry is disabled; the
+        transfer still completed, so the job must succeed."""
+
+        def no_telemetry(handle):
+            raise RuntimeError("NIXL_ERR_NO_TELEMETRY")
+
+        self.agent.get_xfer_telemetry = no_telemetry
+        self.tier.submit_store(make_job(1, [key(1)], [0]))
+        results = drain(self.tier)
+        assert len(results) == 1
+        assert results[0].success
+
     def test_failed_transfer_reported(self):
         self.agent.check_xfer_state = lambda h: "ERR"
         self.tier.submit_store(make_job(1, [key(1)], [0]))
