@@ -120,6 +120,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
         gpu_direct_load: bool = False,
+        gpu_staging_bytes: int | None = None,
     ):
         """Args:
         offloading_spec: Offloading configuration.
@@ -136,6 +137,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         backpressure_detector: Optional backpressure detector.
         gpu_direct_load: Let the workers load chunks straight into GPU
             memory instead of promoting them into the CPU tier.
+        gpu_staging_bytes: GPU staging memory for the workers' direct
+            loads (see ObjStagedLoader); unused by this scheduler-side tier.
 
         """
         super().__init__(

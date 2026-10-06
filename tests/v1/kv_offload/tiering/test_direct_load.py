@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for direct GPU loads from a secondary tier."""
 
+import ctypes
 from collections.abc import Collection, Iterable
 from unittest.mock import MagicMock
 
@@ -10,6 +11,9 @@ import pytest
 import torch
 
 from vllm.v1.kv_offload.base import (
+    CanonicalKVCacheRef,
+    CanonicalKVCaches,
+    CanonicalKVCacheTensor,
     GPULoadStoreSpec,
     LookupResult,
     OffloadKey,
@@ -32,7 +36,12 @@ from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
 )
-from vllm.v1.kv_offload.tiering.obj.direct import ObjDirectLoader
+from vllm.v1.kv_offload.tiering.obj.direct import (
+    ObjDirectLoader,
+    ObjStagedLoader,
+    _KvLayout,
+    _StagedJob,
+)
 
 
 def to_keys(int_ids: Iterable[int]) -> list[OffloadKey]:
@@ -385,3 +394,133 @@ class TestDirectLoadManager:
         assert result is LookupResult.HIT_PENDING
         self._end_step()
         assert len(self.tier.submitted_loads) == 1
+
+
+# --- staged loads -----------------------------------------------------------
+
+
+class FakeObjAgent:
+    """Stands in for a NIXL agent with an OBJ backend: a READ copies object
+    bytes into local memory at the descriptor's address."""
+
+    def __init__(self, objects: dict[str, bytes]):
+        self.objects = objects
+        self.names: dict[int, str] = {}
+        self.reads: list[int] = []
+
+    def register_memory(self, descs, mem_type):
+        assert mem_type == "OBJ"
+        for _, _, dev, name in descs:
+            self.names[dev] = name
+        return [dev for _, _, dev, _ in descs]
+
+    def deregister_memory(self, reg):
+        for dev in reg:
+            del self.names[dev]
+
+    def get_xfer_descs(self, descs, mem_type):
+        return descs
+
+    def initialize_xfer(self, op, local, remote, agent_name):
+        assert op == "READ"
+        return (local, remote)
+
+    def transfer(self, handle):
+        local, remote = handle
+        for (addr, length, _), (offset, rlen, dev) in zip(local, remote):
+            assert length == rlen
+            data = self.objects[self.names[int(dev)]][offset : offset + length]
+            ctypes.memmove(int(addr), data, int(length))
+        self.reads.append(len(local))
+        return "DONE"
+
+    def check_xfer_state(self, handle):
+        return "DONE"
+
+    def release_xfer_handle(self, handle):
+        pass
+
+
+def _staged_loader(kv, objects, blocks_per_chunk, wave, chunk_bytes):
+    loader = object.__new__(ObjStagedLoader)
+    loader._layout = _KvLayout.build(kv, blocks_per_chunk)
+    loader._chunk_bytes = chunk_bytes
+    loader._worker_offset = 0
+    loader._slot_bytes = loader._layout.slice_bytes + 64
+    loader._wave = wave
+    loader._staging = torch.zeros((2 * wave, loader._slot_bytes), dtype=torch.int8)
+    loader._staging_base = loader._staging.data_ptr()
+    loader._device = 0
+    loader._name = "fake"
+    loader._next_obj_dev_id = 1
+    loader._agent = FakeObjAgent(objects)
+
+    def copy(src, dst, size, stream):
+        for s, d, n in zip(src, dst, size):
+            ctypes.memmove(int(d), int(s), int(n))
+
+    loader._copy = copy
+    return loader
+
+
+@pytest.mark.parametrize("wave", [1, 2, 8])
+def test_staged_load_places_every_page(wave):
+    bpc, nb = 4, 32
+    pages = [64, 32]
+    tensors = [torch.zeros((nb, p), dtype=torch.int8) for p in pages]
+    kv = CanonicalKVCaches(
+        tensors=[
+            CanonicalKVCacheTensor(tensor=t, page_size_bytes=p)
+            for t, p in zip(tensors, pages)
+        ],
+        group_data_refs=[
+            [
+                CanonicalKVCacheRef(tensor_idx=i, page_size_bytes=p)
+                for i, p in enumerate(pages)
+            ]
+        ],
+    )
+    chunk_bytes = sum(pages) * bpc + 128
+    rng = np.random.default_rng(3)
+    names = [f"obj/{i}" for i in range(3)]
+    objects = {
+        n: rng.integers(0, 256, chunk_bytes, dtype=np.uint8).tobytes() for n in names
+    }
+    # 10 blocks from logical block 2: chunks 0, 1, 2, scattered GPU ids
+    block_ids = np.array([5, 6, 20, 21, 22, 23, 9, 1, 30, 31], dtype=np.int32)
+    dst = GPULoadStoreSpec(block_ids.tolist(), group_sizes=[10], block_indices=[2])
+    placement = place_blocks(dst, bpc)
+
+    loader = _staged_loader(kv, objects, bpc, wave, chunk_bytes)
+    nbytes = loader._load(_StagedJob(1, names, block_ids, placement), stream=None)
+
+    assert nbytes == 3 * sum(pages) * bpc
+    assert len(loader._agent.reads) == -(-3 // wave)
+    offsets = [0, pages[0] * bpc]
+    for b, k, j in zip(block_ids, placement.chunk_idx, placement.position):
+        for t, page in enumerate(pages):
+            start = offsets[t] + int(j) * page
+            want = np.frombuffer(objects[names[k]][start : start + page], dtype=np.int8)
+            assert np.array_equal(tensors[t][int(b)].numpy(), want)
+    untouched = set(range(nb)) - set(block_ids.tolist())
+    for t in range(len(pages)):
+        assert not tensors[t][sorted(untouched)].any()
+
+
+def test_staged_copy_plan_merges_consecutive_blocks():
+    loader = object.__new__(ObjStagedLoader)
+    loader._staging_base = 1 << 20
+    loader._slot_bytes = 4096
+    slot_of_chunk = np.array([1, 0])
+    # chunk 0 (slot 1): two pages into consecutive blocks, then one apart
+    src, dst, size = loader._copy_plan(
+        chunk=np.array([0, 0, 0]),
+        src_off=np.array([0, 100, 200]),
+        dst=np.array([5000, 5100, 9000]),
+        size=np.array([100, 100, 100]),
+        slot_of_chunk=slot_of_chunk,
+    )
+    base = (1 << 20) + 4096
+    assert src.tolist() == [base, base + 200]
+    assert dst.tolist() == [5000, 9000]
+    assert size.tolist() == [200, 100]

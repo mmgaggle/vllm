@@ -26,6 +26,10 @@ Configuration via kv_connector_extra_config:
       - gpu_direct_load: (optional, "obj" tiers only) load this tier's
         chunks straight into GPU memory on the workers, instead of promoting
         them into the CPU tier. Stores still go through the CPU tier.
+      - gpu_staging_bytes: (optional, with gpu_direct_load) GPU memory for
+        staging slots: each chunk lands in a slot with one GET and is then
+        copied into the KV cache. 0 registers the KV cache itself and reads
+        each block into place, at least one GET per KV cache tensor.
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -474,7 +478,11 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             )
         if self.config.canonical_layout:
             raise ValueError("gpu_direct_load does not support canonical_layout")
-        from vllm.v1.kv_offload.tiering.obj.direct import ObjDirectLoader
+        from vllm.v1.kv_offload.tiering.obj.direct import (
+            DEFAULT_STAGING_BYTES,
+            ObjDirectLoader,
+            ObjStagedLoader,
+        )
 
         rank = (
             0
@@ -482,7 +490,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             else torch.accelerator.current_device_index()
             % self.config.parallel.world_size
         )
-        return ObjDirectLoader(
+        common = dict(
             kv_caches=kv_caches,
             store_config=tier_cfg["store_config"],
             blocks_per_chunk=self.blocks_per_chunk,
@@ -490,6 +498,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             worker_offset=rank * self.cpu_page_size_per_worker,
             io_threads=int(tier_cfg.get("io_threads", 4)),
         )
+        staging_bytes = int(tier_cfg.get("gpu_staging_bytes", DEFAULT_STAGING_BYTES))
+        if staging_bytes > 0:
+            return ObjStagedLoader(**common, staging_bytes=staging_bytes)
+        return ObjDirectLoader(**common)
 
     def _create_cpu_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         world_size = self.config.parallel.world_size
