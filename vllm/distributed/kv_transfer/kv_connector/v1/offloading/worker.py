@@ -60,6 +60,10 @@ class OffloadingConnectorWorker:
 
         # job_id -> req_id for in-flight loads.
         self._load_jobs: dict[int, ReqId] = {}
+        # job_id -> destination GPU block ids for in-flight loads, and the
+        # blocks of failed loads not yet reported to the scheduler.
+        self._load_block_ids: dict[int, list[int]] = {}
+        self._failed_load_block_ids: set[int] = set()
         self._unsubmitted_store_jobs: list[
             tuple[int, GPULoadStoreSpec, LoadStoreSpec]
         ] = []
@@ -253,6 +257,7 @@ class OffloadingConnectorWorker:
         for job_id, entry in metadata.load_jobs.items():
             self._load_jobs[job_id] = entry.req_id
             assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            self._load_block_ids[job_id] = entry.dst_spec.block_ids.tolist()
             success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
@@ -283,11 +288,22 @@ class OffloadingConnectorWorker:
         assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
-            # we currently do not support job failures
             job_id = transfer_result.job_id
-            assert transfer_result.success
             is_load = job_id in self._load_jobs
-            if (
+            load_block_ids = self._load_block_ids.pop(job_id, None)
+            if not transfer_result.success:
+                # A failed store cannot be reported; a failed load reports its
+                # blocks through get_block_ids_with_load_errors(), and the
+                # scheduler applies kv_load_failure_policy to them.
+                assert is_load, f"offloading store job {job_id} failed"
+                assert load_block_ids is not None
+                logger.warning(
+                    "KV load job %d failed; reporting %d blocks as load errors",
+                    job_id,
+                    len(load_block_ids),
+                )
+                self._failed_load_block_ids.update(load_block_ids)
+            elif (
                 transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
             ):
@@ -306,6 +322,10 @@ class OffloadingConnectorWorker:
                 finished_recving.add(req_id)
 
         return set(), finished_recving
+
+    def get_block_ids_with_load_errors(self) -> set[int]:
+        failed, self._failed_load_block_ids = self._failed_load_block_ids, set()
+        return failed
 
     def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
         """Return completed transfer job IDs since the last call."""

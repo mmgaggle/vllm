@@ -31,6 +31,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -274,6 +275,61 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     assert worker.worker is not None
     worker.worker.submit_load.assert_called_once()
     assert worker.build_connector_worker_meta() is None
+
+
+def _load_metadata_with_blocks(job_id: int, block_ids: list[int]):
+    return OffloadingConnectorMetadata(
+        load_jobs={
+            job_id: TransferJob(
+                req_id="req",
+                src_spec=LoadStoreSpec(),
+                dst_spec=GPULoadStoreSpec(
+                    block_ids, group_sizes=(len(block_ids),), block_indices=(0,)
+                ),
+            )
+        },
+        store_jobs={},
+    )
+
+
+def test_failed_load_reports_its_blocks_and_finishes_the_request():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    worker.start_kv_transfers(_load_metadata_with_blocks(10, [4, 7, 9]))
+    assert worker.worker is not None
+    worker.worker.get_finished.return_value = [TransferResult(job_id=10, success=False)]
+
+    _, finished_recving = worker.get_finished(set())
+
+    assert finished_recving == {"req"}
+    assert worker.get_block_ids_with_load_errors() == {4, 7, 9}
+    assert worker.get_block_ids_with_load_errors() == set()
+
+
+def test_successful_load_reports_no_load_errors():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    worker.start_kv_transfers(_load_metadata_with_blocks(10, [4]))
+    assert worker.worker is not None
+    worker.worker.get_finished.return_value = [TransferResult(job_id=10, success=True)]
+
+    _, finished_recving = worker.get_finished(set())
+
+    assert finished_recving == {"req"}
+    assert worker.get_block_ids_with_load_errors() == set()
+
+
+def test_failed_store_still_raises():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    assert worker.worker is not None
+    worker.worker.get_finished.return_value = [TransferResult(job_id=3, success=False)]
+
+    with pytest.raises(AssertionError):
+        worker.get_finished(set())
 
 
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
