@@ -216,6 +216,26 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
 | `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+| `nixl_params` | no | `{}` | Further [NIXL OBJ backend parameters](https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md), passed through as strings. A key that a field above sets is refused. |
+
+With `nixl_params`, the tier can use the NIXL OBJ plugin's S3-over-RDMA engine. For example, against Ceph RGW with OSD passthrough, the OSDs write each block straight into the CPU tier over libfabric, and stores go over HTTP:
+
+```json
+{
+  "type": "obj",
+  "store_config": {
+    "bucket": "vllm-kv",
+    "endpoint_override": "rgw.example.com:8000",
+    "nixl_params": {
+      "accelerated": "true",
+      "rdma_transport": "ofi",
+      "ofi_provider": "verbs;ofi_rxm",
+      "ofi_domain": "mlx5_0",
+      "ofi_node": "10.0.0.5"
+    }
+  }
+}
+```
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 

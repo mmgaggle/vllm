@@ -13,6 +13,11 @@ class ObjStoreConfig:
     plugin falls back to the AWS SDK default credential provider chain
     (IAM roles, environment variables, credential files, etc.), which
     enables workload-identity based auth on Kubernetes.
+
+    ``nixl_params`` passes further NIXL OBJ backend parameters through as
+    they are, for example the S3-over-RDMA settings (``accelerated``,
+    ``rdma_transport``, ``ofi_provider``). A key that one of the fields above
+    sets is refused, so that each setting has one source.
     """
 
     bucket: str
@@ -23,6 +28,25 @@ class ObjStoreConfig:
     region: str = ""
     scheme: str = "http"
     ca_bundle: str = ""
+    nixl_params: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        reserved = {
+            "bucket",
+            "endpoint_override",
+            "scheme",
+            "access_key",
+            "secret_key",
+            "session_token",
+            "region",
+            "ca_bundle",
+        }
+        clashes = sorted(reserved.intersection(self.nixl_params))
+        if clashes:
+            raise ValueError(
+                f"nixl_params must not set {clashes}; use the store_config "
+                "fields of the same name"
+            )
 
     def to_nixl_params(self) -> dict[str, str]:
         """Build the NIXL backend params dict.
@@ -43,4 +67,9 @@ class ObjStoreConfig:
             value = getattr(self, key)
             if value:
                 params[key] = value
+        # NIXL backend parameters are strings, also booleans and numbers.
+        for key, value in self.nixl_params.items():
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            params[key] = str(value)
         return params

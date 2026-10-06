@@ -777,6 +777,30 @@ class TestObjStoreConfig:
         assert params["ca_bundle"] == "/path/to/ca.pem"
         assert "access_key" not in params
 
+    def test_nixl_params_passed_through_as_strings(self):
+        cfg = ObjStoreConfig(
+            bucket="b",
+            endpoint_override="ep",
+            nixl_params={
+                "accelerated": True,
+                "rdma_transport": "ofi",
+                "ofi_provider": "verbs;ofi_rxm",
+                "rdma_fence_ms": 10000,
+            },
+        )
+        params = cfg.to_nixl_params()
+        assert params["accelerated"] == "true"
+        assert params["rdma_transport"] == "ofi"
+        assert params["ofi_provider"] == "verbs;ofi_rxm"
+        assert params["rdma_fence_ms"] == "10000"
+        assert params["bucket"] == "b"
+
+    def test_nixl_params_cannot_shadow_a_field(self):
+        with pytest.raises(ValueError, match="bucket"):
+            ObjStoreConfig(
+                bucket="b", endpoint_override="ep", nixl_params={"bucket": "other"}
+            )
+
 
 def test_obj_tier_replicated_layout_collapses_mapper_identity():
     """TP=2 and TP=4 replicated configs share the obj FileMapper namespace."""
