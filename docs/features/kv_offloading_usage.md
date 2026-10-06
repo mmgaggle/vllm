@@ -205,6 +205,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `STORAGE`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 | `locality` | no | unspecified | `LOCAL` or `REMOTE` relative to the publishing vLLM instance. Included in the tier's KV events only when explicitly configured. |
+| `gpu_direct_load` | no | `false` | Load blocks from the object store straight into GPU memory on the workers, instead of through the CPU tier. Needs an S3-over-RDMA backend that writes GPU memory (see below). Stores still go through the CPU tier. |
 
 `store_config` fields:
 
@@ -236,6 +237,8 @@ With `nixl_params`, the tier can use the NIXL OBJ plugin's S3-over-RDMA engine. 
   }
 }
 ```
+
+With `gpu_direct_load`, each worker registers its GPU KV cache with the NIXL OBJ backend, and a block found only in the object store is read into its GPU block with a ranged GET. The OSDs then write the KV cache straight into GPU memory, and the block passes through neither the CPU tier nor the S3 endpoint. The backend must register GPU memory: with `rdma_transport` `ofi`, the libfabric provider must offer FI_HMEM, and `ofi_hmem` must name the GPU runtime when NIXL was built without one. A load takes one GET per chunk and KV cache tensor, so a larger `block_size` means fewer, larger GETs. The GPU KV cache is registered in regions of at most 2 GiB, and NICs limit how much memory they register, so `--kv-cache-memory-bytes` can cap it. Direct loads do not support `canonical_layout`.
 
 Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)) and are stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) behavior applies to shared buckets as well, so instances sharing a bucket produce identical keys for identical content; set a shared `PYTHONHASHSEED` if you want a custom seed. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
 

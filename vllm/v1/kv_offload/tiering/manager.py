@@ -53,6 +53,7 @@ from vllm.v1.kv_offload.tiering.base import (
     SecondaryTierManager,
     TransferJob,
 )
+from vllm.v1.kv_offload.tiering.direct_load import DirectLoadSpec, TieredLoadSpec
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
 logger = init_logger(__name__)
@@ -79,6 +80,16 @@ class RequestState:
 class JobMetadata(NamedTuple):
     transfer_job: TransferJob
     tier_idx: int
+
+
+class _DirectHits(dict[OffloadKey, int]):
+    """Per-request: keys that lookup() found only in a gpu_direct_load
+    tier, mapped to that tier's index. prepare_load() consumes them."""
+
+
+class _DirectLoads(set[OffloadKey]):
+    """Per-request: keys that prepare_load() sent to a gpu_direct_load
+    tier rather than the primary tier. complete_load() consumes them."""
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -425,10 +436,11 @@ class TieringOffloadingManager(OffloadingManager):
             primary_hit,
             lookup_duration,
         )
-        if primary_hit is LookupResult.HIT:
-            return LookupResult.HIT
-        if primary_hit is LookupResult.HIT_PENDING:
-            return LookupResult.HIT_PENDING
+        if primary_hit in (LookupResult.HIT, LookupResult.HIT_PENDING):
+            direct_hits = req_context.get_state(_DirectHits)
+            if direct_hits:
+                direct_hits.pop(key, None)
+            return primary_hit
 
         any_retry = False
         for i, tier in enumerate(self.secondary_tiers):
@@ -448,6 +460,17 @@ class TieringOffloadingManager(OffloadingManager):
                     result,
                     lookup_duration,
                 )
+                if tier.gpu_direct_load and exclude_tier_idx is None:
+                    # The workers read this chunk straight into GPU memory,
+                    # so it is ready now and needs no primary slot. Requests
+                    # served for other tiers (exclude_tier_idx set) need the
+                    # chunk in the primary tier, so they still promote.
+                    direct_hits = req_context.get_state(_DirectHits)
+                    if direct_hits is None:
+                        direct_hits = _DirectHits()
+                        req_context.set_state(direct_hits)
+                    direct_hits[key] = i
+                    return LookupResult.HIT
                 promoted = self._initiate_promotion(i, key, req_context)
                 return LookupResult.MISS if not promoted else LookupResult.HIT_PENDING
             if result is LookupResult.RETRY:
@@ -556,10 +579,37 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         Returns:
-            LoadStoreSpec for reading from primary tier.
+            LoadStoreSpec for reading from primary tier. When lookup() found
+            some keys only in a gpu_direct_load tier, a TieredLoadSpec with
+            one segment per run of keys from the same source.
 
         """
-        return self.primary_tier.prepare_load(keys, req_context)
+        direct_hits = req_context.get_state(_DirectHits)
+        if not direct_hits or not any(key in direct_hits for key in keys):
+            return self.primary_tier.prepare_load(keys, req_context)
+
+        direct_loads = req_context.get_state(_DirectLoads)
+        if direct_loads is None:
+            direct_loads = _DirectLoads()
+            req_context.set_state(direct_loads)
+        # Runs of consecutive keys with the same source; None is the primary.
+        runs: list[tuple[int | None, list[OffloadKey]]] = []
+        for key in keys:
+            source = direct_hits.pop(key, None)
+            if source is not None:
+                direct_loads.add(key)
+            if runs and runs[-1][0] == source:
+                runs[-1][1].append(key)
+            else:
+                runs.append((source, [key]))
+        segments: list[LoadStoreSpec] = []
+        for source, run in runs:
+            if source is None:
+                segments.append(self.primary_tier.prepare_load(run, req_context))
+            else:
+                tier = self.secondary_tiers[source]
+                segments.append(DirectLoadSpec(source, tier.direct_load_names(run)))
+        return TieredLoadSpec(segments)
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
@@ -586,6 +636,11 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         """
+        direct_loads = req_context.get_state(_DirectLoads)
+        if direct_loads:
+            primary_keys = [key for key in keys if key not in direct_loads]
+            direct_loads.difference_update(keys)
+            keys = primary_keys
         self.primary_tier.complete_load(keys, req_context)
 
     @override

@@ -4,7 +4,7 @@
 
 import ctypes
 import time
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from typing import TYPE_CHECKING, ClassVar, NamedTuple
 
 import numpy as np
@@ -99,6 +99,11 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     Handles CPU DRAM <-> S3 transfers only. GPU <-> CPU is managed by the
     primary tier. Object keys are formed as ``{prefix}/{hash_shard}/{hash}.bin``.
+
+    With ``gpu_direct_load``, the workers load chunks from the object store
+    straight into GPU memory (ObjDirectLoader), and this tier only names the
+    objects. That needs an S3-over-RDMA backend that can write GPU memory,
+    such as the NIXL OBJ accelerated engine with ``rdma_transport=ofi``.
     """
 
     medium: ClassVar[Medium] = Medium.STORAGE
@@ -114,6 +119,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         enable_kv_events: bool = False,
         locality: str | None = None,
         backpressure_detector: BackpressureDetector | None = None,
+        gpu_direct_load: bool = False,
     ):
         """Args:
         offloading_spec: Offloading configuration.
@@ -128,6 +134,8 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         locality: Whether this tier's storage is LOCAL or REMOTE relative
             to the publishing vLLM instance.
         backpressure_detector: Optional backpressure detector.
+        gpu_direct_load: Let the workers load chunks straight into GPU
+            memory instead of promoting them into the CPU tier.
 
         """
         super().__init__(
@@ -137,6 +145,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             backpressure_detector,
         )
         self.locality = Locality(locality) if locality is not None else None
+        self.gpu_direct_load = bool(gpu_direct_load)
 
         self.events: list[OffloadingEvent] | None = None
         if enable_kv_events:
@@ -291,6 +300,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         if result is None:
             return LookupResult.RETRY
         return LookupResult.HIT if result else LookupResult.MISS
+
+    def direct_load_names(self, keys: Collection[OffloadKey]) -> list[str]:
+        return [self._file_mapper.get_file_name(k) for k in keys]
 
     def submit_store(self, job_metadata: TransferJob) -> None:
         if self.events is not None:

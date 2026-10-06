@@ -23,6 +23,9 @@ Configuration via kv_connector_extra_config:
       - module_path: (optional) Python import path to load 'type' from
         when it names an out-of-tree SecondaryTierManager not registered
         via SecondaryTierFactory.register_tier()
+      - gpu_direct_load: (optional, "obj" tiers only) load this tier's
+        chunks straight into GPU memory on the workers, instead of promoting
+        them into the CPU tier. Stores still go through the CPU tier.
       - Additional tier-specific parameters are passed directly to the tier
         constructor. See each tier's documentation for supported parameters.
 
@@ -65,12 +68,17 @@ from vllm.v1.kv_offload.base import (
     OffloadingHistogramMetadata,
     OffloadingManager,
     OffloadingMetricMetadata,
+    OffloadingWorker,
 )
 from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import TieringOffloadingMetrics
+from vllm.v1.kv_offload.tiering.direct_load import (
+    DirectLoader,
+    TieringOffloadingWorker,
+)
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
@@ -435,7 +443,55 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return True
 
     @override
-    def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+    def create_worker(  # type: ignore[override]
+        self, kv_caches: CanonicalKVCaches
+    ) -> OffloadingWorker:
+        cpu_worker = self._create_cpu_worker(kv_caches)
+        direct_tiers = [
+            (tier_idx, tier_cfg)
+            for tier_idx, tier_cfg in enumerate(self.secondary_tier_configs)
+            if tier_cfg.get("gpu_direct_load")
+        ]
+        if not direct_tiers:
+            return cpu_worker
+        try:
+            loaders = {
+                tier_idx: self._create_direct_loader(tier_cfg, kv_caches)
+                for tier_idx, tier_cfg in direct_tiers
+            }
+        except Exception:
+            cpu_worker.shutdown()
+            raise
+        return TieringOffloadingWorker(cpu_worker, loaders, self.blocks_per_chunk)
+
+    def _create_direct_loader(
+        self, tier_cfg: dict[str, Any], kv_caches: CanonicalKVCaches
+    ) -> DirectLoader:
+        if tier_cfg.get("type") != "obj":
+            raise ValueError(
+                f"gpu_direct_load is supported only for 'obj' tiers, "
+                f"not {tier_cfg.get('type')!r}"
+            )
+        if self.config.canonical_layout:
+            raise ValueError("gpu_direct_load does not support canonical_layout")
+        from vllm.v1.kv_offload.tiering.obj.direct import ObjDirectLoader
+
+        rank = (
+            0
+            if self.replicated_layout
+            else torch.accelerator.current_device_index()
+            % self.config.parallel.world_size
+        )
+        return ObjDirectLoader(
+            kv_caches=kv_caches,
+            store_config=tier_cfg["store_config"],
+            blocks_per_chunk=self.blocks_per_chunk,
+            chunk_bytes=self.kv_bytes_per_chunk,
+            worker_offset=rank * self.cpu_page_size_per_worker,
+            io_threads=int(tier_cfg.get("io_threads", 4)),
+        )
+
+    def _create_cpu_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
         world_size = self.config.parallel.world_size
         if self.replicated_layout:
             rank = 0

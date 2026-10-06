@@ -135,12 +135,22 @@ class SecondaryTierManager(ABC):
       - Store: GPU → CPU (primary) → secondary  (cascade)
       - Load:  secondary → CPU (primary) → GPU  (promotion)
 
+    A tier with ``gpu_direct_load`` set is the exception for loads: the
+    workers read its chunks straight into GPU memory (see
+    ``direct_load_names()``), with no promotion into the primary tier.
+    Stores still cascade through the primary tier.
+
     IMPORTANT: All methods run in the Scheduler process and must be
     lightweight and non-blocking. submit_load() and submit_store() submit
     async jobs; get_finished_jobs() polls for completion.
     """
 
     medium: ClassVar[Medium | None] = None
+
+    # True when the workers load this tier's chunks straight into GPU memory.
+    # A HIT then needs no promotion; prepare_load() returns the chunk names
+    # from direct_load_names() for the workers to read.
+    gpu_direct_load: bool = False
 
     def __init__(
         self,
@@ -257,6 +267,22 @@ class SecondaryTierManager(ABC):
 
         """
         pass
+
+    def direct_load_names(self, keys: Collection[OffloadKey]) -> list[str]:
+        """Name the stored chunks that the workers load straight into GPU
+        memory. Only tiers with ``gpu_direct_load`` set implement it.
+
+        Args:
+            keys: Keys that lookup() reported as HIT.
+
+        Returns:
+            One name per key, in order, that the workers' direct loader can
+            read (for the object store tier, the object key).
+
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support direct GPU loads"
+        )
 
     def has_pending_work(self) -> bool:
         """Whether this tier needs the engine to keep stepping.
